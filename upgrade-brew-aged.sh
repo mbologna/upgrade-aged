@@ -64,6 +64,15 @@ MIN_AGE_DAYS=${MIN_AGE_DAYS:-14}
 MAX_COMMITS_BACK=${MAX_COMMITS_BACK:-5}
 NOW=$(date +%s)
 
+# Since Homebrew 6.0 a plain `brew outdated`/`brew upgrade` also lists an
+# auto_updates cask whenever its app bundle is older than the tap. That pulled
+# self-updating apps into the age gate, whose fallback then installed an older
+# aged version over the newer one the app had installed itself (Signal 8.30.0
+# → 8.29.0, which then refused its own database). Turn it off: auto_updates
+# casks enter only through BREW_UPDATED_CASKS below. A named
+# `brew upgrade --cask` is always greedy, so this does not hold those back.
+export HOMEBREW_NO_UPGRADE_AUTO_UPDATES_CASKS=1
+
 # Local tap used to stage aged formula/cask files for installation.
 AGED_TAP_NAME="local/aged"
 AGED_TAP_DIR="$(brew --repository)/Library/Taps/local/homebrew-aged"
@@ -140,14 +149,26 @@ aged_commit_shas() {
 }
 
 # Prints tap, ruby_source_path, installed version (casks only; formulae get
-# it from installed_formula_version) and latest version, separated by \x1f,
-# from brew info JSON on stdin: v1 (an array) for formulae, v2 for casks.
+# it from installed_formula_version), latest version and the app bundle's own
+# version (casks only), separated by \x1f, from brew info JSON on stdin: v1
+# (an array) for formulae, v2 for casks. The bundle version is what is really
+# on disk: an app that updates itself moves it, while `installed` stays at
+# whatever Homebrew last installed.
 # \x1f, not a tab: read collapses runs of whitespace separators, which would
 # shift the fields after an empty one. Read it with: IFS=$'\x1f' read -r ...
 brew_meta() {
-  jq -r 'if type == "array" then .[0] | [.tap, .ruby_source_path, "", .versions.stable]
-    else .casks[0] | [.tap, .ruby_source_path, (.installed // ""), .version] end
+  jq -r 'if type == "array" then .[0] | [.tap, .ruby_source_path, "", .versions.stable, ""]
+    else .casks[0] | [.tap, .ruby_source_path, (.installed // ""), .version,
+      (.bundle_short_version // "")] end
     | map(. // "") | join("\u001f")'
+}
+
+# Returns 0 if version $1 is older than version $2. Cask versions such as
+# 6.11.0,207 are compared on their first field, which is the one an app
+# bundle reports.
+version_lt() {
+  local a="${1%%,*}" b="${2%%,*}"
+  [[ $a != "$b" && $(printf '%s\n' "$a" "$b" | sort -V | head -n1) == "$a" ]]
 }
 
 # Runs (or previews, under --dry-run) the upgrade of $pkg, then relinks its
@@ -202,7 +223,7 @@ deps_aged() {
     [[ -v _OUTDATED[$dep] ]] || continue
 
     local dep_tap dep_ruby_path dep_repo dep_age
-    IFS=$'\x1f' read -r dep_tap dep_ruby_path _ _ < <(brew info "$dep" --json 2>/dev/null | brew_meta) || continue
+    IFS=$'\x1f' read -r dep_tap dep_ruby_path _ _ _ < <(brew info "$dep" --json 2>/dev/null | brew_meta) || continue
     dep_repo=$(tap_to_repo "$dep_tap")
     [[ -z $dep_repo || -z $dep_ruby_path ]] && continue
 
@@ -325,7 +346,7 @@ upgrade_if_aged() {
   [[ -z $is_cask && -v _PINNED[$pkg] ]] && return
 
   # installed_version is reused for the CVE check and the fallback.
-  local json tap ruby_path installed_version latest_version
+  local json tap ruby_path installed_version latest_version bundle_version
   if [[ -n $is_cask ]]; then
     json=$(brew info --cask "$pkg" --json=v2 2>/dev/null)
   else
@@ -335,7 +356,7 @@ upgrade_if_aged() {
     ((_WARNED++))
     return
   }
-  IFS=$'\x1f' read -r tap ruby_path installed_version latest_version < <(brew_meta <<<"$json")
+  IFS=$'\x1f' read -r tap ruby_path installed_version latest_version bundle_version < <(brew_meta <<<"$json")
   [[ -z $is_cask ]] && installed_version=$(installed_formula_version "$pkg")
 
   local repo
@@ -469,6 +490,19 @@ upgrade_if_aged() {
     return
   fi
 
+  # Never install a fallback older than what is already on disk: a version
+  # installed outside this script, or one a cask's app installed by updating
+  # itself (only its bundle version shows that), would be downgraded, and
+  # apps that migrate their data (Signal's database) then refuse to start.
+  local on_disk="$installed_version"
+  [[ -n $bundle_version ]] && version_lt "$on_disk" "$bundle_version" && on_disk="$bundle_version"
+  if [[ -n $on_disk ]] && ! version_lt "$on_disk" "$aged_version"; then
+    _info "$label: aged fallback v${aged_version} is not newer than installed v${on_disk} — skipping (would downgrade)"
+    rm -f "$tap_file"
+    ((_SKIPPED++))
+    return
+  fi
+
   # Compute how old the aged commit is, for messaging.
   local aged_age_days
   aged_age_days=$(commit_age_days "$aged_sha" <<<"$commits_json" 2>/dev/null)
@@ -565,7 +599,7 @@ unpin_if_aged() {
   local json tap ruby_path repo age_days
 
   json=$(brew info "$pkg" --json 2>/dev/null) || return
-  IFS=$'\x1f' read -r tap ruby_path _ _ < <(brew_meta <<<"$json")
+  IFS=$'\x1f' read -r tap ruby_path _ _ _ < <(brew_meta <<<"$json")
   repo=$(tap_to_repo "$tap")
   [[ -z $repo || -z $ruby_path ]] && return
 
@@ -609,6 +643,7 @@ for pkg in "${formulas[@]}"; do
 done
 
 _title "Casks"
+# With HOMEBREW_NO_UPGRADE_AUTO_UPDATES_CASKS set (top of this script),
 # `brew outdated` skips auto_updates casks, leaving them to their own updater.
 # These have that updater turned off (Sparkle keys in .chezmoidata/macos.toml,
 # `auto-update = off` in the Ghostty config) so they update here, age-gated.

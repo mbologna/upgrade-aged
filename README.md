@@ -1,0 +1,83 @@
+# upgrade-aged
+
+Two bash scripts that upgrade [Homebrew](https://brew.sh/) and [mise](https://mise.jdx.dev/)
+packages only once their latest release is old enough, 14 days by default. A package whose
+installed version has a known vulnerability in [OSV.dev](https://osv.dev/) is upgraded straight
+away.
+
+The reasoning, and how the scripts decide, is in the blog post
+[Age-gating brew upgrade: the supply-chain policy my laptop was missing](https://www.michelebologna.net/2026/supply-chain-age-gate-laptop/).
+
+These files are mirrored from my private dotfiles by CI. Fixes are welcome as issues; a pull
+request would be overwritten by the next sync, so I apply changes there and they come back here.
+
+## What is in here
+
+| File | What it does |
+|---|---|
+| `upgrade-brew-aged.sh` | Age-gates Homebrew formulae and casks. Falls back to the newest aged version when the latest is too new, and checks dependencies and dependents before upgrading. |
+| `upgrade-mise-aged.sh` | Age-gates mise tools, using the date of each tool's GitHub release. |
+| `lib/osv-check.sh` | The OSV.dev check, and the map from package names to OSV ecosystem names. |
+| `lib/github-api.sh` | GitHub API calls, cached per run, with rate-limit handling. |
+| `lib/log.sh` | Output helpers. |
+
+## Requirements
+
+- bash 4.2 or later. macOS ships bash 3.2, so install a newer one with `brew install bash`. The
+  scripts use `#!/usr/bin/env bash`, so the Homebrew bash has to come first on `PATH`.
+- `curl` and [jq](https://jqlang.org/).
+- `python3`, for `upgrade-brew-aged.sh` only (it reads version fields out of formula files).
+- Homebrew or mise, depending on the script.
+
+## Install
+
+Copy the scripts and the `lib/` directory together; the scripts look for `lib/` next to
+themselves.
+
+```bash
+git clone https://github.com/mbologna/upgrade-aged.git
+mkdir -p ~/.local/bin
+cp -R upgrade-aged/upgrade-*-aged.sh upgrade-aged/lib ~/.local/bin/
+```
+
+Run either script with `--dry-run` first. It prints what it would upgrade, hold back or skip,
+and why, without changing anything.
+
+## Configuration
+
+Both scripts read environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MIN_AGE_DAYS` | `14` | How many days old a release must be before it is installed. |
+| `GITHUB_TOKEN` | unset | A GitHub token. Without one the GitHub API allows 60 requests an hour, which a normal week of updates uses up; with one, 5000. It needs no permissions. |
+| `MAX_COMMITS_BACK` | `5` | Brew only: how many past commits of a formula to search for an aged version. |
+| `MISE_LOCK_AUTOCOMMIT` | `1` | mise only: commit `mise.lock` after syncing it back to a [chezmoi](https://www.chezmoi.io/) source directory. Does nothing without chezmoi. |
+| `MISE_LOCK_AUTOPUSH` | `0` | mise only: push after that commit. |
+
+Some settings are lists in the scripts, and you will want to edit them for your machine:
+
+- `BREW_UPDATED_CASKS` in `upgrade-brew-aged.sh`: casks that update themselves, which you want
+  gated anyway. Turn each app's own updater off first, or it will keep updating past the gate.
+- `GITHUB_REPOS` in `upgrade-mise-aged.sh`: the GitHub repository of each mise tool. A tool that
+  is not listed is skipped with a warning, never upgraded unchecked.
+- `OSV_PACKAGES` in `lib/osv-check.sh`: the OSV ecosystem name of each package. A package that is
+  not listed gets no vulnerability exemption and waits like any other.
+
+## Running from topgrade
+
+With [topgrade](https://github.com/topgrade-rs/topgrade), disable its own brew and mise steps,
+or they will install everything the scripts held back:
+
+```toml
+[misc]
+disable = ["brew_formula", "brew_cask", "mise"]
+
+[commands]
+"Homebrew (aged)" = "~/.local/bin/upgrade-brew-aged.sh"
+"mise (aged)" = "~/.local/bin/upgrade-mise-aged.sh"
+```
+
+## License
+
+[MIT](LICENSE)

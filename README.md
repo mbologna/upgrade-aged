@@ -5,8 +5,13 @@ packages only once their latest release is old enough, 14 days by default. A pac
 installed version has a known vulnerability in [OSV.dev](https://osv.dev/) is upgraded straight
 away.
 
+For mise the wait itself is mise's own
+[`minimum_release_age`](https://mise.jdx.dev/configuration/settings.html) setting; the script
+adds the vulnerability exemption and skips tools whose backend publishes no release dates,
+which that setting cannot hold back.
+
 The reasoning, and how the scripts decide, is in the blog post
-[Age-gating brew upgrade: the supply-chain policy my laptop was missing](https://www.michelebologna.net/2026/supply-chain-age-gate-laptop/).
+[Age-gating brew and mise upgrades: the supply-chain policy my laptop was missing](https://www.michelebologna.net/2026/supply-chain-age-gate-laptop/).
 
 These files are mirrored from my private dotfiles by CI. Fixes are welcome as issues; a pull
 request would be overwritten by the next sync, so I apply changes there and they come back here.
@@ -16,9 +21,9 @@ request would be overwritten by the next sync, so I apply changes there and they
 | File | What it does |
 |---|---|
 | `upgrade-brew-aged.sh` | Age-gates Homebrew formulae and casks. Falls back to the newest aged version when the latest is too new, and checks dependencies and dependents before upgrading. |
-| `upgrade-mise-aged.sh` | Age-gates mise tools, using the date of each tool's GitHub release. |
+| `upgrade-mise-aged.sh` | Upgrades mise tools within mise's `minimum_release_age`, adds the vulnerability exemption, and skips tools without release dates. |
 | `lib/osv-check.sh` | The OSV.dev check, and the map from package names to OSV ecosystem names. |
-| `lib/github-api.sh` | GitHub API calls, cached per run, with rate-limit handling. |
+| `lib/github-api.sh` | GitHub API calls for the brew script, cached per run, with rate-limit handling. |
 | `lib/log.sh` | Output helpers. |
 
 ## Requirements
@@ -26,6 +31,8 @@ request would be overwritten by the next sync, so I apply changes there and they
 - bash 4.2 or later. macOS ships bash 3.2, so install a newer one with `brew install bash`. The
   scripts use `#!/usr/bin/env bash`, so the Homebrew bash has to come first on `PATH`.
 - `curl` and [jq](https://jqlang.org/).
+- For mise, a version with the `minimum_release_age` setting, set in your mise config
+  (`minimum_release_age = "14d"`). The script refuses to run without it.
 - `python3`, for `upgrade-brew-aged.sh` only (it reads version fields out of formula files).
 - Homebrew or mise, depending on the script.
 
@@ -45,12 +52,12 @@ and why, without changing anything.
 
 ## Configuration
 
-Both scripts read environment variables:
+The scripts read environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MIN_AGE_DAYS` | `14` | How many days old a release must be before it is installed. |
-| `GITHUB_TOKEN` | unset | A GitHub token. Without one the GitHub API allows 60 requests an hour, which a normal week of updates uses up; with one, 5000. It needs no permissions. |
+| `MIN_AGE_DAYS` | `14` | Brew only: how many days old a release must be before it is installed. For mise, set `minimum_release_age` instead. |
+| `GITHUB_TOKEN` | the `gh` login | Brew only: a GitHub token. When unset, the script asks the [GitHub CLI](https://cli.github.com/) for its login. Without either, the GitHub API allows 60 requests an hour, which a normal week of updates uses up; with one, 5000. It needs no permissions. |
 | `MAX_COMMITS_BACK` | `5` | Brew only: how many past commits of a formula to search for an aged version. |
 | `MISE_LOCK_AUTOCOMMIT` | `1` | mise only: commit `mise.lock` after syncing it back to a [chezmoi](https://www.chezmoi.io/) source directory. Does nothing without chezmoi. |
 | `MISE_LOCK_AUTOPUSH` | `0` | mise only: push after that commit. |
@@ -59,8 +66,6 @@ Some settings are lists in the scripts, and you will want to edit them for your 
 
 - `BREW_UPDATED_CASKS` in `upgrade-brew-aged.sh`: casks that update themselves, which you want
   gated anyway. Turn each app's own updater off first, or it will keep updating past the gate.
-- `GITHUB_REPOS` in `upgrade-mise-aged.sh`: the GitHub repository of each mise tool. A tool that
-  is not listed is skipped with a warning, never upgraded unchecked.
 - `OSV_PACKAGES` in `lib/osv-check.sh`: the OSV ecosystem name of each package. A package that is
   not listed gets no vulnerability exemption and waits like any other.
 

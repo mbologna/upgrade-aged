@@ -9,7 +9,7 @@ usage() {
 Usage: $(basename "$0") [--dry-run] [--help]
 
 Upgrade Homebrew formulae and casks whose latest commit is >= MIN_AGE_DAYS old.
-Set GITHUB_TOKEN to raise the GitHub API rate limit (60 → 5000 req/hr).
+GitHub API calls use the gh CLI login (or GITHUB_TOKEN) for 5000 req/hr, not 60.
 
 A package whose installed version has a known CVE (see OSV_PACKAGES in
 lib/osv-check.sh) bypasses the age gate immediately. A package is also held
@@ -23,7 +23,7 @@ Options:
 Environment variables:
   MIN_AGE_DAYS       Minimum age in days before upgrading (default: 14)
   MAX_COMMITS_BACK   Number of past commits to search for an aged version (default: 5)
-  GITHUB_TOKEN       GitHub personal access token (optional)
+  GITHUB_TOKEN       GitHub token (default: the gh CLI login)
 EOF
   exit 0
 }
@@ -55,7 +55,7 @@ for _cmd in brew jq; do
 done
 
 # Uses GitHub API since modern Homebrew (4.0+) doesn't clone taps locally.
-# Set GITHUB_TOKEN env var to raise the API rate limit (60 → 5000 req/hr).
+# Authenticated via the gh CLI login (or GITHUB_TOKEN): 5000 req/hr, not 60.
 #
 # If the latest version hasn't aged yet, the script walks back through the last
 # MAX_COMMITS_BACK commits and installs from the most recent aged one (n-1, n-2, …).

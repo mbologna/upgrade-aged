@@ -64,8 +64,8 @@ has_vulnerability() {
   local payload
   payload=$(jq -nc --arg v "$version" --arg n "${entry#*:}" --arg e "${entry%%:*}" \
     '{version: $v, package: {name: $n, ecosystem: $e}}') || return 1
-  # No Authorization header: OSV.dev is a public API, and GITHUB_TOKEN is a
-  # GitHub PAT that has no business being sent to a third party.
+  # No Authorization header: OSV.dev is a public API, and the GitHub token
+  # github-api.sh uses has no business being sent to a third party.
   local response
   response=$(curl -sf --max-time 10 -X POST "https://api.osv.dev/v1/query" \
     -H "Content-Type: application/json" -d "$payload" 2>/dev/null) || return 1

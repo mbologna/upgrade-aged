@@ -13,12 +13,29 @@
 #
 # Call it directly, never inside $(...): a command substitution runs in a
 # subshell, so the cache, the latch and GH_BODY would be lost on return.
-# Set GITHUB_TOKEN to raise the rate limit (60 → 5000 req/hr).
+# A token raises the rate limit (60 → 5000 req/hr). $GITHUB_TOKEN wins when set
+# (CI); otherwise the first call asks the gh CLI, so the token never has to be
+# exported to every process. Without either, requests go out anonymously.
 
 declare -gA _GH_CACHE=()
 declare -gi GH_RATE_LIMITED=0
 GH_BODY=""
 readonly _GH_FAILED="__FETCH_FAILED__"
+
+# Resolved on the first request and kept for the run; empty means anonymous.
+_GH_TOKEN=""
+declare -gi _GH_TOKEN_RESOLVED=0
+
+# Sets _GH_TOKEN. Call it directly, not in $(...), for the same reason as
+# github_api_get.
+_github_resolve_token() {
+  ((_GH_TOKEN_RESOLVED)) && return 0
+  _GH_TOKEN_RESOLVED=1
+  _GH_TOKEN=${GITHUB_TOKEN:-}
+  if [[ -z $_GH_TOKEN ]] && command -v gh >/dev/null; then
+    _GH_TOKEN=$(gh auth token 2>/dev/null) || _GH_TOKEN=""
+  fi
+}
 
 github_api_get() {
   local url="$1"
@@ -34,7 +51,8 @@ github_api_get() {
   ((GH_RATE_LIMITED)) && return 1
 
   local curl_args=(-s -w '\n%{http_code}' --max-time 10)
-  [[ -n ${GITHUB_TOKEN:-} ]] && curl_args+=(-H "Authorization: token ${GITHUB_TOKEN}")
+  _github_resolve_token
+  [[ -n $_GH_TOKEN ]] && curl_args+=(-H "Authorization: token ${_GH_TOKEN}")
 
   local raw http_code body
   raw=$(curl "${curl_args[@]}" "$url" 2>/dev/null) || return 1
@@ -43,7 +61,7 @@ github_api_get() {
 
   if [[ $http_code == "403" || $http_code == "429" ]] && grep -qi "rate limit" <<<"$body"; then
     GH_RATE_LIMITED=1
-    _warn "GitHub API rate limit hit — set GITHUB_TOKEN to raise it (60→5000 req/hr). Skipping remaining age checks that need the API." >&2
+    _warn "GitHub API rate limit hit — run 'gh auth login' or set GITHUB_TOKEN to raise it (60→5000 req/hr). Skipping remaining age checks that need the API." >&2
     [[ -v _WARNED ]] && ((_WARNED++))
     return 1
   fi

@@ -1,40 +1,45 @@
 #!/usr/bin/env bash
-# Upgrade only mise tools whose latest GitHub release was published >= MIN_AGE_DAYS ago.
-# No -e: one failed brew/mise/API call counts as a failure and the run
-# goes on to the next package; pipefail and -u still catch mistakes.
+# Upgrade mise tools. The age gate itself is mise's own minimum_release_age
+# (14d, set in ~/.config/mise/config.toml), which holds back fresh releases on
+# every mise install and upgrade, not only this one. This script adds what
+# that setting lacks:
+#   - a CVE bypass: a tool whose installed version has a known vulnerability
+#     (OSV.dev, see lib/osv-check.sh) upgrades now, past the cutoff;
+#   - a guard for backends that publish no release dates (vfox:eza, for one),
+#     which the cutoff cannot hold back: those are skipped, never upgraded;
+#   - syncing the refreshed mise.lock back to the chezmoi source.
+# No -e: one failed mise/API call counts as a failure and the run goes on to
+# the next tool; pipefail and -u still catch mistakes.
 set -uo pipefail
 
 usage() {
-  cat <<EOF
+  cat <<EOT
 Usage: $(basename "$0") [--dry-run] [--help]
 
-Upgrade mise-managed tools whose latest GitHub release is >= MIN_AGE_DAYS old.
-Set GITHUB_TOKEN to raise the GitHub API rate limit (60 → 5000 req/hr).
+Upgrade mise-managed tools to the newest release mise's minimum_release_age
+setting allows (14 days in this config).
 
 A tool whose installed version has a known CVE (see OSV_PACKAGES in
-lib/osv-check.sh) bypasses the age gate immediately.
+lib/osv-check.sh) bypasses the age gate immediately. A tool whose backend
+reports no release dates is skipped, because the age gate cannot apply to it.
 
 Options:
   --dry-run    Print what would be upgraded without making any changes.
   --help       Show this help message.
 
 Environment variables:
-  MIN_AGE_DAYS   Minimum age in days before upgrading (default: 14)
-  GITHUB_TOKEN   GitHub personal access token (optional)
   MISE_LOCK_AUTOCOMMIT  Auto-commit mise.lock after sync (default: 1)
   MISE_LOCK_AUTOPUSH    Auto-push after auto-commit (default: 0)
-EOF
+EOT
   exit 0
 }
 
-# Shared helpers: output glyphs, GitHub API GET and OSV.dev CVE check.
+# Shared helpers: output glyphs and the OSV.dev CVE check.
 _lib="$(dirname "$0")/lib"
 # The linter runs without -x, so it cannot follow these (log.sh is also a
 # rendered template).
 # shellcheck disable=SC1091
 source "$_lib/log.sh"
-# shellcheck disable=SC1091
-source "$_lib/github-api.sh"
 # shellcheck disable=SC1091
 source "$_lib/osv-check.sh"
 
@@ -46,22 +51,22 @@ for _arg in "$@"; do
   esac
 done
 
-# All tools must have a GitHub mapping — unmapped tools are skipped (not silently upgraded).
-# Set GITHUB_TOKEN env var to raise API rate limit (60 → 5000 req/hr).
-
-MIN_AGE_DAYS=${MIN_AGE_DAYS:-14}
 MISE_LOCK_AUTOCOMMIT=${MISE_LOCK_AUTOCOMMIT:-1}
 MISE_LOCK_AUTOPUSH=${MISE_LOCK_AUTOPUSH:-0}
-# shellcheck disable=SC2034 # read by iso_age_days in lib/github-api.sh
-NOW=$(date +%s)
 
-command -v jq &>/dev/null || {
-  _err "jq not found — this script requires jq."
+for _cmd in mise jq; do
+  command -v "$_cmd" &>/dev/null || {
+    _err "$_cmd not found — this script requires mise and jq."
+    exit 1
+  }
+done
+
+CUTOFF=$(mise settings get minimum_release_age 2>/dev/null) || {
+  _err "mise minimum_release_age is not set — refusing to upgrade without an age gate"
   exit 1
 }
 
-# Summary counters printed at the end of the run. GitHub API responses are
-# memoized in lib/github-api.sh.
+# Summary counters printed at the end of the run.
 declare -i _UPGRADED=0 _CVE_BYPASSED=0 _SKIPPED=0 _WARNED=0 _FAILED=0
 
 mise_lock_source_path() {
@@ -129,204 +134,72 @@ auto_commit_mise_lock() {
   fi
 }
 
-# Tool name → GitHub owner/repo mapping.
-declare -A GITHUB_REPOS=(
-  # Linux CLI tools (mise replaces Homebrew on Linux for these)
-  [age]="FiloSottile/age"
-  [atuin]="atuinsh/atuin"
-  [bat]="sharkdp/bat"
-  [btop]="aristocratos/btop"
-  [chezmoi]="twpayne/chezmoi"
-  [curlie]="rs/curlie"
-  [delta]="dandavison/delta"
-  [difftastic]="Wilfred/difftastic"
-  [doggo]="mr-karan/doggo"
-  [dua]="Byron/dua-cli"
-  [duf]="muesli/duf"
-  [dust]="bootandy/dust"
-  [eza]="eza-community/eza"
-  [fastfetch]="fastfetch-cli/fastfetch"
-  [fd]="sharkdp/fd"
-  [fzf]="junegunn/fzf"
-  [glow]="charmbracelet/glow"
-  [trippy]="fujiapple852/trippy"
-  [grex]="pemistahl/grex"
-  [hexyl]="sharkdp/hexyl"
-  [hyperfine]="sharkdp/hyperfine"
-  [just]="casey/just"
-  [k9s]="derailed/k9s"
-  [kubectl]="kubernetes/kubernetes"
-  [ripgrep]="BurntSushi/ripgrep"
-  [sd]="chmln/sd"
-  [starship]="starship-rs/starship"
-  [tlrc]="tldr-pages/tlrc"
-  [viddy]="sachaos/viddy"
-  [watchexec]="watchexec/watchexec"
-  [xh]="ducaale/xh"
-  [yazi]="sxyazi/yazi"
-  [zoxide]="ajeetdsouza/zoxide"
-  # Language runtimes
-  [go]="golang/go"
-  [maven]="apache/maven"
-  [node]="nodejs/node"
-  [python]="python/cpython"
-  [ruby]="ruby/ruby"
-  # Language tools
-  [gradle]="gradle/gradle"
-  ["pre-commit"]="pre-commit/pre-commit"
-  [ruff]="astral-sh/ruff"
-  [shellcheck]="koalaman/shellcheck"
-  [uv]="astral-sh/uv"
-)
-
-# Generate the ordered list of release tag candidates for a given tool+version.
-# Eclipse Temurin (java) uses per-major-version repos and non-standard tag format;
-# it is handled separately in fetch_java_release_age.
-release_tags() {
-  local tool="$1" version="$2"
-  # Standard formats first (cover most tools)
-  echo "v${version}"
-  echo "${version}"
-  # Tool-specific tag formats
-  case "$tool" in
-  go) echo "go${version}" ;;            # golang/go: go1.24.3
-  ruby) echo "v${version//./_}" ;;      # ruby/ruby: v3_4_3
-  maven) echo "maven-${version}" ;;     # apache/maven: maven-3.9.10
-  gradle) echo "REL_${version//./_}" ;; # gradle/gradle: REL_9_4_1
-  esac
-}
-
-# Sets RELEASE_DATE to the release date of the first matching tag candidate. Tries the
-# Releases API first (the common case). Some repos (e.g. golang/go) tag
-# versions without ever creating a GitHub "Release" object, so this falls
-# back to resolving the tag as a plain git ref and using its commit date.
-# Returns 1 if nothing matched. Like github_api_get, call it directly, not in
-# $(...), so the API cache and rate-limit latch survive.
-fetch_release_date() {
-  local repo="$1"
-  shift
-  local tag
-  RELEASE_DATE=""
-  for tag in "$@"; do
-    github_api_get "https://api.github.com/repos/${repo}/releases/tags/${tag}" || continue
-    RELEASE_DATE=$(jq -er '.published_at // empty' <<<"$GH_BODY" 2>/dev/null) && return 0
-  done
-  for tag in "$@"; do
-    github_api_get "https://api.github.com/repos/${repo}/commits/${tag}" || continue
-    RELEASE_DATE=$(jq -er '.commit.committer.date // empty' <<<"$GH_BODY" 2>/dev/null) && return 0
-  done
-  return 1
-}
-
-# Sets RELEASE_DATE for a tool's release; returns 1 if no tag matched.
-fetch_release_age() {
-  local repo="$1" tool="$2" version="$3"
-  local -a tags
-  mapfile -t tags < <(release_tags "$tool" "$version")
-  fetch_release_date "$repo" "${tags[@]}"
-}
-
-# Eclipse Temurin uses per-major-version repos: adoptium/temurinN-binaries
-# Tag format: jdk-21.0.7+6 (strip the mise-added trailing .0.1 patch suffix)
-fetch_java_release_age() {
-  local version="$1"
-  local major="${version%%.*}"
-  local repo="adoptium/temurin${major}-binaries"
-  # Temurin tag: jdk-21.0.7+6 — mise version may be 21.0.7+6.0.1; strip last segment
-  local tag_ver="${version%.*}" # 21.0.7+6.0.1 → 21.0.7+6.0
-  tag_ver="${tag_ver%.*}"       # 21.0.7+6.0   → 21.0.7+6
-  # Normalise: mise may use + or . as build separator
-  tag_ver="${tag_ver//+/.}" # for lookup attempt without +
-  fetch_release_date "$repo" "jdk-${version%.*.*}" "jdk-${tag_ver}"
-}
-
-# Runs (or previews, under --dry-run) `mise upgrade <tool>`.
+# Runs (or previews, under --dry-run) `mise upgrade <tool>`, passing any extra
+# arguments through.
 do_upgrade() {
   local tool="$1"
+  shift
   if ((DRY_RUN)); then
-    _info "[dry-run] would run: mise upgrade $tool" "   "
+    _info "[dry-run] would run: mise upgrade $tool $*" "   "
     return 0
   fi
-  mise upgrade "$tool" </dev/null || {
+  mise upgrade "$tool" "$@" </dev/null || {
     _err "$tool: upgrade failed"
     ((_FAILED++))
     return 1
   }
 }
 
-# Returns 0 if the tool was (or would be, under --dry-run) upgraded, 1 otherwise.
-upgrade_if_aged() {
-  local tool="$1" latest="$2"
-
-  # CVE check: bypass age gate if the installed version has known vulnerabilities.
-  local installed_ver
-  installed_ver=$(mise current "$tool" 2>/dev/null | awk '{print $1}')
-  if [[ -n $installed_ver && $installed_ver != "system" ]] && has_vulnerability "$tool" "$installed_ver"; then
-    _warn "$tool: CVE in installed v${installed_ver} — bypassing age gate"
-    do_upgrade "$tool" || return 1
-    ((_CVE_BYPASSED++))
-    return 0
-  fi
-
-  local age_days
-  if [[ $tool == "java" ]]; then
-    # Java: special-cased due to Temurin's per-major-version repos and tag format
-    fetch_java_release_age "$latest" || {
-      if ((GH_RATE_LIMITED)); then
-        ((_SKIPPED++))
-      else
-        _warn "java: could not check Temurin release age for ${latest}, skipping"
-        ((_WARNED++))
-      fi
-      return 1
-    }
-  else
-    local repo="${GITHUB_REPOS[$tool]:-}"
-    if [[ -z $repo ]]; then
-      _warn "$tool: no GitHub release mapping — skipping (add to GITHUB_REPOS to enable)"
-      ((_WARNED++))
-      return 1
-    fi
-    fetch_release_age "$repo" "$tool" "$latest" || {
-      if ((GH_RATE_LIMITED)); then
-        ((_SKIPPED++))
-      else
-        _warn "$tool: could not check release age for ${latest}, skipping"
-        ((_WARNED++))
-      fi
-      return 1
-    }
-  fi
-  age_days=$(iso_age_days "$RELEASE_DATE")
-
-  if ((age_days >= MIN_AGE_DAYS)); then
-    _ok "$tool: ${latest} is ${age_days}d old — upgrading"
-    do_upgrade "$tool" || return 1
-    ((_UPGRADED++))
-    return 0
-  else
-    _info "$tool: ${latest} only ${age_days}d old — skipping"
-    ((_SKIPPED++))
-    return 1
-  fi
+# Returns 0 if the tool's backend publishes release dates, which is what
+# minimum_release_age filters on. Without them mise applies no cutoff at all.
+has_release_dates() {
+  mise ls-remote "$1" --json 2>/dev/null | jq -e 'any(.[]; .created_at != null)' >/dev/null 2>&1
 }
 
-_title "Checking outdated mise tools (age gate: ${MIN_AGE_DAYS}d)"
+_title "Checking outdated mise tools (age gate: ${CUTOFF}, from mise)"
 
-outdated_json=$(mise outdated --json 2>/dev/null) || {
+# Every outdated tool with the cutoff lifted, so the CVE check also sees tools
+# whose fix is still younger than the cutoff ...
+all_json=$(MISE_MINIMUM_RELEASE_AGE=0s mise outdated --json 2>/dev/null) || {
+  _err "mise outdated failed"
+  exit 1
+}
+# ... and the ones mise itself would upgrade now, with the cutoff applied.
+eligible_json=$(mise outdated --json 2>/dev/null) || {
   _err "mise outdated failed"
   exit 1
 }
 
-if jq -e 'length == 0' <<<"$outdated_json" >/dev/null; then
+if jq -e 'length == 0' <<<"$all_json" >/dev/null; then
   _ok "All mise tools are up to date"
   exit 0
 fi
 
-while IFS=$'\t' read -r tool latest; do
+while IFS=$'\t' read -r tool installed latest; do
   [[ -z $latest ]] && continue
-  upgrade_if_aged "$tool" "$latest"
-done < <(jq -r 'to_entries[] | [.key, (.value.latest // "")] | @tsv' <<<"$outdated_json")
+
+  if [[ -n $installed && $installed != "system" ]] && has_vulnerability "$tool" "$installed"; then
+    _warn "$tool: CVE in installed v${installed} — bypassing age gate"
+    do_upgrade "$tool" --minimum-release-age 0s && ((_CVE_BYPASSED++))
+    continue
+  fi
+
+  eligible=$(jq -r --arg t "$tool" '.[$t].latest // empty' <<<"$eligible_json")
+  if [[ -z $eligible || $eligible == "$installed" ]]; then
+    _info "$tool: ${latest} is younger than ${CUTOFF} — held back by mise"
+    ((_SKIPPED++))
+    continue
+  fi
+
+  if ! has_release_dates "$tool"; then
+    _warn "$tool: backend publishes no release dates, so the age gate cannot apply — skipping"
+    ((_WARNED++))
+    continue
+  fi
+
+  _ok "$tool: upgrading to ${eligible}"
+  do_upgrade "$tool" && ((_UPGRADED++))
+done < <(jq -r 'to_entries[] | [.key, (.value.current // ""), (.value.latest // "")] | @tsv' <<<"$all_json")
 
 # Reconcile lock file and prune old versions after any upgrades.
 # NOTE: do NOT run `mise install` here — with lockfile=true, that would downgrade

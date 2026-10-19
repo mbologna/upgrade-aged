@@ -663,14 +663,25 @@ for cask in "${casks[@]}"; do
 done
 
 _title "Summary"
-((DRY_RUN)) && echo "(dry-run — no changes were made; counts reflect what would have happened)"
-echo "Upgraded (age-gated):    ${_UPGRADED}"
-echo "Upgraded (CVE bypass):   ${_CVE_BYPASSED}"
-echo "Fallback installs:       ${_FALLBACK_INSTALLED}"
-echo "Unpinned (now aged):     ${_UNPINNED}"
-echo "Skipped:                 ${_SKIPPED}"
-echo "Warnings:                ${_WARNED}"
-echo "Failed:                  ${_FAILED}"
+((DRY_RUN)) && _info "dry-run — no changes were made; counts reflect what would have happened"
+# _count label n color: the label default fg; a count above zero in its level
+# color, zero plain (a number, not an outcome: doc/color-system.md §4).
+_c_red=${_c_ok:+$'\033[31m'} # _c_err gates on stderr; this summary is stdout
+_count() {
+  local color=$3
+  (($2)) || color=''
+  printf '%-25s%s%s%s\n' "$1" "$color" "$2" "${color:+$_c_off}"
+}
+# shellcheck disable=SC2154 # _c_* colors come from lib/log.sh
+{
+  _count "Upgraded (age-gated):" "${_UPGRADED}" "$_c_ok"
+  _count "Upgraded (CVE bypass):" "${_CVE_BYPASSED}" "$_c_ok"
+  _count "Fallback installs:" "${_FALLBACK_INSTALLED}" "$_c_ok"
+  _count "Unpinned (now aged):" "${_UNPINNED}" "$_c_ok"
+  _count "Skipped:" "${_SKIPPED}" "$_c_dim"
+  _count "Warnings:" "${_WARNED}" "$_c_warn"
+  _count "Failed:" "${_FAILED}" "$_c_red"
+}
 
 # Non-zero exit when an upgrade failed, so topgrade reports the step as failed.
 ((_FAILED == 0))

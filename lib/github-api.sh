@@ -52,10 +52,15 @@ github_api_get() {
 
   local curl_args=(-s -w '\n%{http_code}' --max-time 10)
   _github_resolve_token
-  [[ -n $_GH_TOKEN ]] && curl_args+=(-H "Authorization: token ${_GH_TOKEN}")
+  # The header goes in on stdin (-H @-), so the token never shows in ps
+  local header=""
+  if [[ -n $_GH_TOKEN ]]; then
+    curl_args+=(-H @-)
+    header="Authorization: token ${_GH_TOKEN}"
+  fi
 
   local raw http_code body
-  raw=$(curl "${curl_args[@]}" "$url" 2>/dev/null) || return 1
+  raw=$(curl "${curl_args[@]}" "$url" 2>/dev/null <<<"$header") || return 1
   http_code="${raw##*$'\n'}"
   body="${raw%$'\n'*}"
 

@@ -429,7 +429,7 @@ upgrade_if_aged() {
     return
   }
   local head_content head_ver
-  head_content=$(curl -sf "https://raw.githubusercontent.com/${repo}/${head_sha}/${ruby_path}") || {
+  head_content=$(curl -sf --max-time 10 "https://raw.githubusercontent.com/${repo}/${head_sha}/${ruby_path}") || {
     _warn "$label: could not fetch HEAD formula, skipping"
     ((_WARNED++))
     return
@@ -455,7 +455,7 @@ upgrade_if_aged() {
   while IFS= read -r sha; do
     local raw_url="https://raw.githubusercontent.com/${repo}/${sha}/${ruby_path}"
     local formula_content
-    formula_content=$(curl -sf "$raw_url") || continue
+    formula_content=$(curl -sf --max-time 10 "$raw_url") || continue
     local ver
     ver=$(extract_formula_version <<<"$formula_content" 2>/dev/null) || continue
     if [[ $ver != "$latest_version" ]]; then

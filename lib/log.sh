@@ -31,3 +31,25 @@ _warn() { printf '%s%s⚠%s %b\n' "${2-$_log_indent}" "$_c_warn" "$_c_off" "$1";
 _skip() { printf '%s%s∅ %s%s\n' "${2-$_log_indent}" "$_c_dim" "$1" "$_c_off"; }
 _title() { printf '\n%s▸ %s%s\n' "$_c_title" "$1" "$_c_off"; }
 
+# --- script helpers (not in utils/log-sh: chezmoi hooks embed that, and any
+# change there re-runs every run_onchange_ hook) ---
+# Red for stdout lists and summaries (deletions, failure counts): _c_err
+# follows stderr, so it would stay plain or color the wrong stream.
+_c_red=${_c_ok:+$'\033[31m'}
+# _count label n color: the label default fg; a count above zero in its level
+# color, zero plain (a number, not an outcome: doc/color-system.md §4).
+_count() {
+  local color=$3
+  (($2)) || color=''
+  printf '%-25s%s%s%s\n' "$1" "$color" "$2" "${color:+$_c_off}"
+}
+# _require cmd...: exit 1 naming the first command not on PATH.
+_require() {
+  local cmd
+  for cmd in "$@"; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+      _err "$cmd not found"
+      exit 1
+    }
+  done
+}

@@ -17,7 +17,8 @@ back if any of its outdated dependencies haven't aged yet, even once its own
 version has.
 
 Options:
-  --dry-run    Print what would be upgraded without making any changes.
+  --dry-run    Print what would be upgraded without making any changes:
+               no brew update, no aged tap, against the formula data on disk.
   --help       Show this help message.
 
 Environment variables:
@@ -47,12 +48,7 @@ for _arg in "$@"; do
   esac
 done
 
-for _cmd in brew jq; do
-  command -v "$_cmd" &>/dev/null || {
-    _err "$_cmd not found — this script requires Homebrew and jq."
-    exit 1
-  }
-done
+_require brew jq
 
 # Uses GitHub API since modern Homebrew (4.0+) doesn't clone taps locally.
 # Authenticated via the gh CLI login (or GITHUB_TOKEN): 5000 req/hr, not 60.
@@ -465,7 +461,7 @@ upgrade_if_aged() {
     if [[ $ver != "$latest_version" ]]; then
       aged_sha="$sha"
       aged_version="$ver"
-      printf '%s\n' "$formula_content" >"$tap_file"
+      ((DRY_RUN)) || printf '%s\n' "$formula_content" >"$tap_file"
       break
     fi
   done < <(aged_commit_shas <<<"$commits_json")
@@ -618,9 +614,18 @@ unpin_if_aged() {
   fi
 }
 
-brew update </dev/null 2>&1 | grep -Ev "No remote 'origin' in .*/local/homebrew-aged" || true
-
-setup_aged_tap
+# The aged tap is local and has no origin; drop only that complaint. pipefail
+# makes a failed update (offline, broken tap) fail the pipeline: warn and go
+# on with the formula data already on disk. --dry-run changes nothing, so it
+# skips both the update and the tap and reads the data already on disk.
+if ((DRY_RUN)); then
+  _info "dry-run — skipping brew update and the aged tap; using the formula data on disk"
+else
+  if ! brew update </dev/null 2>&1 | { grep -Ev "No remote 'origin' in .*/local/homebrew-aged" || true; }; then
+    _warn "brew update failed — checking against the existing formula data"
+  fi
+  setup_aged_tap
+fi
 refresh_outdated_cache
 
 _title "Unpinning aged formulas"
@@ -664,14 +669,6 @@ done
 
 _title "Summary"
 ((DRY_RUN)) && _info "dry-run — no changes were made; counts reflect what would have happened"
-# _count label n color: the label default fg; a count above zero in its level
-# color, zero plain (a number, not an outcome: doc/color-system.md §4).
-_c_red=${_c_ok:+$'\033[31m'} # _c_err gates on stderr; this summary is stdout
-_count() {
-  local color=$3
-  (($2)) || color=''
-  printf '%-25s%s%s%s\n' "$1" "$color" "$2" "${color:+$_c_off}"
-}
 # shellcheck disable=SC2154 # _c_* colors come from lib/log.sh
 {
   _count "Upgraded (age-gated):" "${_UPGRADED}" "$_c_ok"

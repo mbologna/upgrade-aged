@@ -54,12 +54,7 @@ done
 MISE_LOCK_AUTOCOMMIT=${MISE_LOCK_AUTOCOMMIT:-1}
 MISE_LOCK_AUTOPUSH=${MISE_LOCK_AUTOPUSH:-0}
 
-for _cmd in mise jq; do
-  command -v "$_cmd" &>/dev/null || {
-    _err "$_cmd not found — this script requires mise and jq."
-    exit 1
-  }
-done
+_require mise jq
 
 CUTOFF=$(mise settings get minimum_release_age 2>/dev/null) || {
   _err "mise minimum_release_age is not set — refusing to upgrade without an age gate"
@@ -238,14 +233,6 @@ fi
 
 _title "Summary"
 ((DRY_RUN)) && _info "dry-run — no changes were made; counts reflect what would have happened"
-# _count label n color: the label default fg; a count above zero in its level
-# color, zero plain (a number, not an outcome: doc/color-system.md §4).
-_c_red=${_c_ok:+$'\033[31m'} # _c_err gates on stderr; this summary is stdout
-_count() {
-  local color=$3
-  (($2)) || color=''
-  printf '%-25s%s%s%s\n' "$1" "$color" "$2" "${color:+$_c_off}"
-}
 # shellcheck disable=SC2154 # _c_* colors come from lib/log.sh
 {
   _count "Upgraded (age-gated):" "${_UPGRADED}" "$_c_ok"

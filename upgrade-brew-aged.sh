@@ -21,7 +21,7 @@ GitHub API calls use the gh CLI login (or GITHUB_TOKEN) for 5000 req/hr, not 60.
 A package whose installed version has a known CVE (see OSV_PACKAGES in
 lib/osv-check.sh) bypasses the age gate immediately. A package is also held
 back if any of its outdated dependencies haven't aged yet, even once its own
-version has.
+version has. Ends with brew autoremove and brew cleanup.
 
 Options:
   --dry-run    Print what would be upgraded without making any changes:
@@ -675,6 +675,23 @@ mapfile -t casks < <(
 for cask in "${casks[@]}"; do
   upgrade_if_aged "$cask" cask
 done
+
+_title "Cleanup"
+# Formulas no longer needed as dependencies, and old versions and downloads.
+# Kept here because topgrade's brew cleanup runs only in its own brew steps,
+# which this script replaces.
+if ((DRY_RUN)); then
+  _info "[dry-run] would run: brew autoremove, brew cleanup" "   "
+else
+  brew autoremove || {
+    _warn "brew autoremove failed"
+    ((_WARNED++))
+  }
+  brew cleanup || {
+    _warn "brew cleanup failed"
+    ((_WARNED++))
+  }
+fi
 
 _title "Summary"
 ((DRY_RUN)) && _info "dry-run — no changes were made; counts reflect what would have happened"

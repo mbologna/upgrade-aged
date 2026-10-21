@@ -66,7 +66,7 @@ github_api_get() {
 
   if [[ $http_code == "403" || $http_code == "429" ]] && grep -qi "rate limit" <<<"$body"; then
     GH_RATE_LIMITED=1
-    _warn "GitHub API rate limit hit — run 'gh auth login' or set GITHUB_TOKEN to raise it (60→5000 req/hr). Skipping remaining age checks that need the API." >&2
+    _warn "GitHub API rate limit hit — run 'gh auth login' or set GITHUB_TOKEN to raise it (60→5000 req/hr); skipping remaining age checks that need the API"
     [[ -v _WARNED ]] && ((_WARNED++))
     return 1
   fi

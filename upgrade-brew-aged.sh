@@ -4,6 +4,13 @@
 # goes on to the next package; pipefail and -u still catch mistakes.
 set -uo pipefail
 
+# Associative arrays and [[ -v array[key] ]] (here and in lib/github-api.sh)
+# need bash 4.3. macOS's /bin/bash is 3.2; `env bash` finds Homebrew's first.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
+  echo "$(basename "$0"): needs bash 4.3 or newer, this is $BASH_VERSION (brew install bash)" >&2
+  exit 1
+fi
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--dry-run] [--help]
@@ -29,7 +36,8 @@ EOF
   exit 0
 }
 
-# Shared helpers: output glyphs, GitHub API GET and OSV.dev CVE check.
+# Shared helpers: output glyphs, GitHub API GET, OSV.dev CVE check and the
+# self-updating casks this script upgrades.
 _lib="$(dirname "$0")/lib"
 # The linter runs without -x, so it cannot follow these (log.sh is also a
 # rendered template).
@@ -39,6 +47,8 @@ source "$_lib/log.sh"
 source "$_lib/github-api.sh"
 # shellcheck disable=SC1091
 source "$_lib/osv-check.sh"
+# shellcheck disable=SC1091
+source "$_lib/brew-updated-casks.sh"
 
 DRY_RUN=0
 for _arg in "$@"; do
@@ -650,12 +660,11 @@ done
 _title "Casks"
 # With HOMEBREW_NO_UPGRADE_AUTO_UPDATES_CASKS set (top of this script),
 # `brew outdated` skips auto_updates casks, leaving them to their own updater.
-# These have that updater turned off (Sparkle keys in .chezmoidata/macos.toml,
-# `auto-update = off` in the Ghostty config) so they update here, age-gated.
+# BREW_UPDATED_CASKS (lib/brew-updated-casks.sh) have that updater turned off
+# (Sparkle keys in .chezmoidata/macos.toml, `auto-update = off` in the Ghostty
+# config) so they update here, age-gated.
 # Other auto_updates casks keep self-updating: pulling them in would reinstall
 # an aged version over a newer self-installed one.
-BREW_UPDATED_CASKS=(appcleaner darkmodebuddy ghostty iina keka monitorcontrol
-  netnewswire sourcetree supremo telegram tunnelblick)
 mapfile -t casks < <(
   {
     brew outdated --cask --quiet

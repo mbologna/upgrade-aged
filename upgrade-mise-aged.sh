@@ -12,6 +12,13 @@
 # the next tool; pipefail and -u still catch mistakes.
 set -uo pipefail
 
+# lib/osv-check.sh declares global associative arrays (declare -gA): bash
+# 4.2. macOS's /bin/bash is 3.2; `env bash` finds Homebrew's first.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 2))); then
+  echo "$(basename "$0"): needs bash 4.2 or newer, this is $BASH_VERSION (brew install bash)" >&2
+  exit 1
+fi
+
 usage() {
   cat <<EOT
 Usage: $(basename "$0") [--dry-run] [--help]
@@ -30,6 +37,8 @@ Options:
 Environment variables:
   MISE_LOCK_AUTOCOMMIT  Auto-commit mise.lock after sync (default: 1)
   MISE_LOCK_AUTOPUSH    Auto-push after auto-commit (default: 0)
+  MISE_LOCK_SOURCE      Lock to sync with (default: the chezmoi source's lock
+                        for this machine's tool set)
 EOT
   exit 0
 }
@@ -42,6 +51,8 @@ _lib="$(dirname "$0")/lib"
 source "$_lib/log.sh"
 # shellcheck disable=SC1091
 source "$_lib/osv-check.sh"
+# shellcheck disable=SC1091
+source "$_lib/mise-lock.sh"
 
 DRY_RUN=0
 for _arg in "$@"; do
@@ -63,26 +74,6 @@ CUTOFF=$(mise settings get minimum_release_age 2>/dev/null) || {
 
 # Summary counters printed at the end of the run.
 declare -i _UPGRADED=0 _CVE_BYPASSED=0 _SKIPPED=0 _WARNED=0 _FAILED=0
-
-mise_lock_source_path() {
-  local live_lock="$1"
-  local lock_src source_dir fallback_src
-
-  lock_src=$(chezmoi source-path "$live_lock" 2>/dev/null || true)
-  if [[ -n $lock_src && -f $lock_src ]]; then
-    printf '%s\n' "$lock_src"
-    return 0
-  fi
-
-  source_dir=$(chezmoi source-path 2>/dev/null || true)
-  fallback_src="${source_dir}/private_dot_config/mise/private_mise.lock"
-  if [[ -n $source_dir && -f $fallback_src ]]; then
-    printf '%s\n' "$fallback_src"
-    return 0
-  fi
-
-  return 1
-}
 
 auto_commit_mise_lock() {
   local lock_src="$1"
@@ -112,8 +103,9 @@ auto_commit_mise_lock() {
     return
   fi
 
-  # Lockfile refresh is deterministic output; skip hooks to avoid blocking automation.
-  if git -C "$repo_root" commit --no-verify -m "$commit_msg" -- "$lock_src" >/dev/null 2>&1; then
+  # With the repo's hooks: the secret scan and commitlint run on this
+  # commit too. A refusal leaves the lock staged for a manual commit.
+  if git -C "$repo_root" commit -m "$commit_msg" -- "$lock_src" >/dev/null 2>&1; then
     _ok "mise.lock committed to git"
   else
     _err "mise.lock: auto-commit failed"
@@ -145,11 +137,47 @@ do_upgrade() {
   }
 }
 
+# Copies the live lock back to this machine's chezmoi source lock, so the
+# next apply doesn't revert it, and commits it. Never when the source also
+# moved (LOCK_STATE both): that would undo another machine's upgrade.
+sync_lock_back() {
+  [[ -n $LOCK_SRC && -f $MISE_LOCK_LIVE && $LOCK_STATE != both ]] || return 0
+  if [[ -f $LOCK_SRC ]] && cmp -s "$MISE_LOCK_LIVE" "$LOCK_SRC"; then
+    return 0
+  fi
+  if ((DRY_RUN)); then
+    _info "[dry-run] would sync mise.lock to the chezmoi source and auto-commit/push if enabled" "   "
+    return 0
+  fi
+  mise_lock_push "$LOCK_SRC" && _ok "mise.lock synced back to chezmoi source ($LOCK_SRC)"
+  if [[ $MISE_LOCK_AUTOCOMMIT == "1" ]] && command -v git >/dev/null 2>&1; then
+    auto_commit_mise_lock "$LOCK_SRC"
+  fi
+}
+
 # Returns 0 if the tool's backend publishes release dates, which is what
 # minimum_release_age filters on. Without them mise applies no cutoff at all.
 has_release_dates() {
   mise ls-remote "$1" --json 2>/dev/null | jq -e 'any(.[]; .created_at != null)' >/dev/null 2>&1
 }
+
+# Start from the newest lock: take the source's when only it moved (another
+# machine's upgrade, pulled), so the promotion at the end builds on it.
+LOCK_SRC=$(mise_lock_source)
+LOCK_STATE=$(mise_lock_state "$LOCK_SRC")
+case $LOCK_STATE in
+missing | source)
+  if ((DRY_RUN)); then
+    _info "[dry-run] would update mise.lock from the chezmoi source"
+  else
+    mise_lock_pull "$LOCK_SRC" && _ok "mise.lock updated from the chezmoi source"
+  fi
+  ;;
+both)
+  _warn "mise.lock changed both here and in the chezmoi source: upgrading, but not syncing it back"
+  _hint "run" "MISE_LOCK_FORCE_SYNC=1 chezmoi apply" "to take the source's, then re-run"
+  ;;
+esac
 
 _title "Checking outdated mise tools (age gate: ${CUTOFF}, from mise)"
 
@@ -166,7 +194,8 @@ eligible_json=$(mise outdated --json 2>/dev/null) || {
 }
 
 if jq -e 'length == 0' <<<"$all_json" >/dev/null; then
-  _ok "All mise tools are up to date"
+  _ok "all mise tools are up to date"
+  sync_lock_back
   exit 0
 fi
 
@@ -207,28 +236,19 @@ TOTAL_UPGRADED=$((_UPGRADED + _CVE_BYPASSED))
 if ((TOTAL_UPGRADED > 0)); then
   if ((DRY_RUN)); then
     _title "Reconciling mise environment (${TOTAL_UPGRADED} tool(s) would be upgraded)"
-    _info "[dry-run] would sync mise.lock to chezmoi source, auto-commit/push if enabled, and run: mise prune --yes" "   "
+    sync_lock_back
+    _info "[dry-run] would run: mise prune --yes" "   "
   else
     _title "Reconciling mise environment (${TOTAL_UPGRADED} tool(s) upgraded)"
-
-    # Sync updated lock file back to chezmoi source to prevent next apply reverting it.
-    MISE_LOCK="${HOME}/.config/mise/mise.lock"
-    if [[ -f $MISE_LOCK ]] && command -v chezmoi >/dev/null 2>&1; then
-      LOCK_SRC=$(mise_lock_source_path "$MISE_LOCK" 2>/dev/null || true)
-      if [[ -n $LOCK_SRC && -f $LOCK_SRC ]]; then
-        cp "$MISE_LOCK" "$LOCK_SRC" && _ok "mise.lock synced back to chezmoi source ($LOCK_SRC)"
-        if [[ $MISE_LOCK_AUTOCOMMIT == "1" ]] && command -v git >/dev/null 2>&1; then
-          auto_commit_mise_lock "$LOCK_SRC"
-        fi
-      fi
-    fi
-
+    sync_lock_back
     if mise prune --yes; then
       _ok "mise prune: old versions removed"
     else
       _err "mise prune failed"
     fi
   fi
+else
+  sync_lock_back
 fi
 
 _title "Summary"

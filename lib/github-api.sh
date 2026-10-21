@@ -8,8 +8,8 @@
 #
 # Sets GH_BODY to the response body and returns 0 on HTTP 200, 1 otherwise.
 # Responses (and failures) are memoized by URL for the life of the run. A
-# 403/429 rate limit response latches GH_RATE_LIMITED, prints one actionable
-# warning, and makes every later call fail fast without another round-trip.
+# 403/429 rate limit response latches GH_RATE_LIMITED, prints a warning and a
+# hint, and makes every later call fail fast without another round-trip.
 #
 # Call it directly, never inside $(...): a command substitution runs in a
 # subshell, so the cache, the latch and GH_BODY would be lost on return.
@@ -66,7 +66,8 @@ github_api_get() {
 
   if [[ $http_code == "403" || $http_code == "429" ]] && grep -qi "rate limit" <<<"$body"; then
     GH_RATE_LIMITED=1
-    _warn "GitHub API rate limit hit — run 'gh auth login' or set GITHUB_TOKEN to raise it (60→5000 req/hr); skipping remaining age checks that need the API"
+    _warn "GitHub API rate limit hit (60 requests/hour without a login); skipping the remaining age checks that need the API"
+    _hint "to raise it to 5000/hour, run" "gh auth login"
     [[ -v _WARNED ]] && ((_WARNED++))
     return 1
   fi

@@ -11,6 +11,10 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); 
   exit 1
 fi
 
+# brew trust and brew.env live under XDG_CONFIG_HOME when it is set and in
+# ~/.homebrew otherwise; match the shell's (.zshenv) when run without it.
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--dry-run] [--help]

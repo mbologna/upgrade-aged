@@ -45,7 +45,9 @@ declare -gA OSV_PACKAGES=(
   [k9s]="Go:github.com/derailed/k9s"
   [kubectl]="Go:k8s.io/kubectl"
   ["kubernetes-cli"]="Go:k8s.io/kubectl"
-  [sops]="Go:go.mozilla.org/sops/v3"
+  # The module path since 3.8; the old go.mozilla.org path has only
+  # advisories fixed in 3.7.1
+  [sops]="Go:github.com/getsops/sops/v3"
   [trivy]="Go:github.com/aquasecurity/trivy"
   # PyPI (Python)
   ["pre-commit"]="PyPI:pre-commit"
@@ -53,7 +55,8 @@ declare -gA OSV_PACKAGES=(
   [uv]="PyPI:uv"
   # Other
   [maven]="Maven:org.apache.maven:maven-core"
-  [node]="npm:node"
+  # node is unmapped: npm:node is a separate npm package that installs
+  # Node.js binaries, not Node.js
 )
 
 has_vulnerability() {

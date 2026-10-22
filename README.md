@@ -24,11 +24,13 @@ request would be overwritten by the next sync, so I apply changes there and they
 | `upgrade-mise-aged.sh` | Upgrades mise tools within mise's `minimum_release_age`, adds the vulnerability exemption, and skips tools without release dates. |
 | `lib/osv-check.sh` | The OSV.dev check, and the map from package names to OSV ecosystem names. |
 | `lib/github-api.sh` | GitHub API calls for the brew script, cached per run, with rate-limit handling. |
+| `lib/brew-updated-casks.sh` | The list of self-updating casks the brew script gates anyway (`BREW_UPDATED_CASKS`). |
+| `lib/mise-lock.sh` | Keeps a live `mise.lock` and its [chezmoi](https://www.chezmoi.io/) source copy in step; used by the mise script. |
 | `lib/log.sh` | Output helpers. |
 
 ## Requirements
 
-- bash 4.2 or later. macOS ships bash 3.2, so install a newer one with `brew install bash`. The
+- bash 4.3 or later (4.2 for the mise script). macOS ships bash 3.2, so install a newer one with `brew install bash`. The
   scripts use `#!/usr/bin/env bash`, so the Homebrew bash has to come first on `PATH`.
 - `curl` and [jq](https://jqlang.org/).
 - For mise, a version with the `minimum_release_age` setting, set in your mise config
@@ -64,7 +66,7 @@ The scripts read environment variables:
 
 Some settings are lists in the scripts, and you will want to edit them for your machine:
 
-- `BREW_UPDATED_CASKS` in `upgrade-brew-aged.sh`: casks that update themselves, which you want
+- `BREW_UPDATED_CASKS` in `lib/brew-updated-casks.sh`: casks that update themselves, which you want
   gated anyway. Turn each app's own updater off first, or it will keep updating past the gate.
 - `OSV_PACKAGES` in `lib/osv-check.sh`: the OSV ecosystem name of each package. A package that is
   not listed gets no vulnerability exemption and waits like any other.

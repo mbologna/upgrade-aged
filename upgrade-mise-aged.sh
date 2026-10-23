@@ -199,7 +199,9 @@ if jq -e 'length == 0' <<<"$all_json" >/dev/null; then
   exit 0
 fi
 
-while IFS=$'\t' read -r tool installed latest; do
+# Fields split on \x1f, not tabs: tab is IFS whitespace, so an empty
+# `current` (a tool not installed yet) collapsed and shifted latest into it.
+while IFS=$'\x1f' read -r tool installed latest; do
   [[ -z $latest ]] && continue
 
   if [[ -n $installed && $installed != "system" ]] && has_vulnerability "$tool" "$installed"; then
@@ -223,7 +225,7 @@ while IFS=$'\t' read -r tool installed latest; do
 
   _ok "$tool: upgrading to ${eligible}"
   do_upgrade "$tool" && ((_UPGRADED++))
-done < <(jq -r 'to_entries[] | [.key, (.value.current // ""), (.value.latest // "")] | @tsv' <<<"$all_json")
+done < <(jq -r 'to_entries[] | [.key, (.value.current // ""), (.value.latest // "")] | join("\u001f")' <<<"$all_json")
 
 # Reconcile lock file and prune old versions after any upgrades.
 # NOTE: do NOT run `mise install` here — with lockfile=true, that would downgrade

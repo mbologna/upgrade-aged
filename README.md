@@ -11,7 +11,7 @@ adds the vulnerability exemption and skips tools whose backend publishes no rele
 which that setting cannot hold back.
 
 The reasoning, and how the scripts decide, is in the blog post
-[Age-gating brew and mise upgrades: the supply-chain policy my laptop was missing](https://www.michelebologna.net/2026/supply-chain-age-gate-laptop/).
+[Making Homebrew and mise wait two weeks before they upgrade](https://www.michelebologna.net/2026/homebrew-mise-wait-two-weeks/).
 
 These files are mirrored from my private dotfiles by CI. Fixes are welcome as issues; a pull
 request would be overwritten by the next sync, so I apply changes there and they come back here.

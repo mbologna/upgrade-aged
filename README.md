@@ -1,7 +1,8 @@
 # upgrade-aged
 
-Two bash scripts that upgrade [Homebrew](https://brew.sh/) and [mise](https://mise.jdx.dev/)
-packages only once their latest release is old enough, 14 days by default. A package whose
+Bash scripts that upgrade [Homebrew](https://brew.sh/) and [mise](https://mise.jdx.dev/)
+packages, and [uv](https://docs.astral.sh/uv/) tools, only once their latest release is old
+enough, 14 days by default. A package whose
 installed version has a known vulnerability in [OSV.dev](https://osv.dev/) is upgraded straight
 away.
 
@@ -22,7 +23,8 @@ request would be overwritten by the next sync, so I apply changes there and they
 |---|---|
 | `upgrade-brew-aged.sh` | Age-gates Homebrew formulae and casks. Falls back to the newest aged version when the latest is too new, and checks dependencies and dependents before upgrading. |
 | `upgrade-mise-aged.sh` | Upgrades mise tools within mise's `minimum_release_age`, adds the vulnerability exemption, and skips tools without release dates. |
-| `lib/osv-check.sh` | The OSV.dev check, and the map from package names to OSV ecosystem names. |
+| `upgrade-uv-tools-aged.sh` | Upgrades `uv tool install` tools with uv's `--exclude-newer`, adds the vulnerability exemption, and never downgrades a tool already newer than the window. |
+| `lib/osv-check.sh` | The OSV.dev check (`osv_vulnerable` for a known ecosystem, `has_vulnerability` through the map), and the map from package names to OSV ecosystem names. |
 | `lib/github-api.sh` | GitHub API calls for the brew script, cached per run, with rate-limit handling. |
 | `lib/brew-updated-casks.sh` | The list of self-updating casks the brew script gates anyway (`BREW_UPDATED_CASKS`). |
 | `lib/mise-lock.sh` | Keeps a live `mise.lock` and its [chezmoi](https://www.chezmoi.io/) source copy in step; used by the mise script. |
@@ -35,6 +37,7 @@ request would be overwritten by the next sync, so I apply changes there and they
 - `curl` and [jq](https://jqlang.org/).
 - For mise, a version with the `minimum_release_age` setting, set in your mise config
   (`minimum_release_age = "14d"`). The script refuses to run without it.
+- For uv tools, uv 0.9.17 or later, which takes a relative `--exclude-newer` (`"14 days"`).
 - `python3`, for `upgrade-brew-aged.sh` only (it reads version fields out of formula files).
 - Homebrew or mise, depending on the script.
 
@@ -58,7 +61,7 @@ The scripts read environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MIN_AGE_DAYS` | `14` | Brew only: how many days old a release must be before it is installed. For mise, set `minimum_release_age` instead. |
+| `MIN_AGE_DAYS` | `14` | Brew and uv tools: how many days old a release must be before it is installed. For mise, set `minimum_release_age` instead. |
 | `GITHUB_TOKEN` | the `gh` login | Brew only: a GitHub token. When unset, the script asks the [GitHub CLI](https://cli.github.com/) for its login. Without either, the GitHub API allows 60 requests an hour, which a normal week of updates uses up; with one, 5000. It needs no permissions. |
 | `MAX_COMMITS_BACK` | `5` | Brew only: how many past commits of a formula to search for an aged version. |
 | `MISE_LOCK_AUTOCOMMIT` | `1` | mise only: commit `mise.lock` after syncing it back to a [chezmoi](https://www.chezmoi.io/) source directory. Does nothing without chezmoi. |
@@ -78,11 +81,12 @@ or they will install everything the scripts held back:
 
 ```toml
 [misc]
-disable = ["brew_formula", "brew_cask", "mise"]
+disable = ["brew_formula", "brew_cask", "mise", "uv"]
 
 [commands]
 "Homebrew (aged)" = "~/.local/bin/upgrade-brew-aged.sh"
 "mise (aged)" = "~/.local/bin/upgrade-mise-aged.sh"
+"uv tools (aged)" = "~/.local/bin/upgrade-uv-tools-aged.sh"
 ```
 
 ## License

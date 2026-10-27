@@ -63,9 +63,17 @@ has_vulnerability() {
   local pkg="$1" version="$2"
   local entry="${OSV_PACKAGES[$pkg]:-}"
   [[ -z $entry ]] && return 1
+  osv_vulnerable "${entry%%:*}" "${entry#*:}" "$version"
+}
+
+# osv_vulnerable <ecosystem> <name> <version>: the query itself, for callers
+# that already know the OSV name (a uv tool is a PyPI package by definition,
+# so upgrade-uv-tools-aged.sh needs no OSV_PACKAGES entry per tool).
+osv_vulnerable() {
+  local ecosystem="$1" name="$2" version="$3"
   # jq builds the body so a stray quote in a version can't inject JSON.
   local payload
-  payload=$(jq -nc --arg v "$version" --arg n "${entry#*:}" --arg e "${entry%%:*}" \
+  payload=$(jq -nc --arg v "$version" --arg n "$name" --arg e "$ecosystem" \
     '{version: $v, package: {name: $n, ecosystem: $e}}') || return 1
   # No Authorization header: OSV.dev is a public API, and the GitHub token
   # github-api.sh uses has no business being sent to a third party.

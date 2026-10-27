@@ -11,6 +11,14 @@ For mise the wait itself is mise's own
 adds the vulnerability exemption and skips tools whose backend publishes no release dates,
 which that setting cannot hold back.
 
+The wait is what is now called a *dependency cooldown*. William Woodruff
+[explains why it works](https://blog.yossarian.net/2025/11/21/We-should-all-be-using-dependency-cooldowns)
+(eight of ten recent supply-chain attacks were caught within a week) and
+[answers the usual objections](https://blog.yossarian.net/2025/12/13/cooldowns-redux);
+[cooldowns.dev](https://cooldowns.dev/) lists the setting each package manager has for it. These
+scripts cover what those settings cannot: Homebrew, which has none, a vulnerability exemption, and
+upgrades that never go backwards.
+
 The reasoning, and how the scripts decide, is in the blog post
 [Making Homebrew and mise wait two weeks before they upgrade](https://www.michelebologna.net/2026/homebrew-mise-wait-two-weeks/).
 

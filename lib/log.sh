@@ -38,6 +38,8 @@ _warn() { printf '%s%s⚠%s %s\n' "${2-$_log_indent}" "$_c_err_warn" "$_c_err_of
 # (default [y/N]); the caller reads the answer.
 _ask() { printf '%s? %s %s%s%s ' "$_log_indent" "$1" "$_c_err_dim" "${2-[y/N]}" "$_c_err_off" >&2; }
 _skip() { printf '%s%s∅ %s%s\n' "${2-$_log_indent}" "$_c_dim" "$1" "$_c_off"; }
+# _item text: a list item under the line above, plain (U+2022, two spaces in)
+_item() { printf '%s  • %s\n' "${2-$_log_indent}" "$1"; }
 _title() { printf '\n%s▸ %s%s\n' "$_c_title" "$1" "$_c_off"; }
 
 # --- script helpers (not in utils/log-sh: chezmoi hooks embed that, and any

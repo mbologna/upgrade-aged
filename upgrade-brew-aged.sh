@@ -95,6 +95,7 @@ declare -A _OUTDATED=()
 declare -A _PINNED=()
 declare -A _DRY_UNPINNED=() # formulas unpin_if_aged would unpin, in --dry-run
 declare -A _RELINKED=()     # dependents already reinstalled this run, by relink_dependents (dedup)
+declare -A _CVE=()          # OSV answers by pkg@version, so no package is queried twice
 declare -i _UPGRADED=0 _CVE_BYPASSED=0 _FALLBACK_INSTALLED=0 _UNPINNED=0 _SKIPPED=0 _WARNED=0 _FAILED=0
 
 setup_aged_tap() {
@@ -107,10 +108,16 @@ setup_aged_tap() {
   brew trust "$AGED_TAP_NAME" 2>/dev/null || true
 }
 
+# Maps a tap to the GitHub repository brew clones it from: `owner/name` is
+# github.com/owner/homebrew-name, so third-party taps (terraform-linters/tap)
+# are gated too. Prints nothing for local taps (the aged tap has no remote)
+# and for anything that is not owner/name.
 tap_to_repo() {
   case "$1" in
   homebrew/core) echo "Homebrew/homebrew-core" ;;
   homebrew/cask) echo "Homebrew/homebrew-cask" ;;
+  local/* | */*/* | /* | */) echo "" ;;
+  ?*/?*) echo "${1%%/*}/homebrew-${1#*/}" ;;
   *) echo "" ;;
   esac
 }
@@ -199,6 +206,17 @@ brew_upgrade() {
   relink_dependents "$pkg" "$is_cask"
 }
 
+# Returns 0 if OSV.dev lists a vulnerability for package $1 at version $2
+# (has_vulnerability, lib/osv-check.sh), memoized for the run: a pinned
+# formula is checked by unpin_if_aged and again when the main loop reaches it.
+installed_vulnerable() {
+  local key="$1@$2"
+  if [[ ! -v _CVE[$key] ]]; then
+    if has_vulnerability "$1" "$2"; then _CVE[$key]=1; else _CVE[$key]=0; fi
+  fi
+  ((_CVE[$key]))
+}
+
 # Prints the installed version of formula $1 without its _N revision suffix.
 installed_formula_version() {
   brew list --versions "$1" 2>/dev/null | awk '{sub(/_[0-9]+$/, "", $2); print $2}'
@@ -243,7 +261,7 @@ deps_aged() {
     if ((dep_age < MIN_AGE_DAYS)); then
       local dep_ver
       dep_ver=$(installed_formula_version "$dep")
-      if [[ -n $dep_ver ]] && has_vulnerability "$dep" "$dep_ver"; then
+      if [[ -n $dep_ver ]] && installed_vulnerable "$dep" "$dep_ver"; then
         _warn "dep $dep: CVE in installed v${dep_ver} — allowing dependency upgrade" "   "
         continue
       fi
@@ -352,7 +370,8 @@ upgrade_if_aged() {
   local label="$pkg${is_cask:+ (cask)}"
 
   # Already pinned from a previous run — skip without any API calls.
-  # unpin_if_aged() handles unpinning once the latest version has aged.
+  # unpin_if_aged() unpins it once the latest version has aged, or when the
+  # pinned version has a known vulnerability.
   [[ -z $is_cask && -v _PINNED[$pkg] ]] && return
 
   # installed_version is reused for the CVE check and the fallback.
@@ -414,7 +433,7 @@ upgrade_if_aged() {
   fi
 
   # CVE check: bypass age gate if installed version has known vulnerabilities.
-  if [[ -n $installed_version ]] && has_vulnerability "$pkg" "$installed_version"; then
+  if [[ -n $installed_version ]] && installed_vulnerable "$pkg" "$installed_version"; then
     if ! dependents_ready "$pkg" "$is_cask"; then
       _warn "$label: CVE in installed v${installed_version}, but an installed dependent hasn't aged yet — skipping to avoid breaking it (patch $pkg manually if this is urgent)"
       ((_SKIPPED++))
@@ -602,29 +621,38 @@ upgrade_if_aged() {
   rm -f "$tap_file"
 }
 
-# Unpin a formula if its latest version has aged past MIN_AGE_DAYS.
-# Called before the main upgrade loop so the formula gets picked up by brew outdated.
+# Unpin a formula if its latest version has aged past MIN_AGE_DAYS, or if
+# OSV.dev lists a vulnerability for the version it is pinned at (an aged
+# fallback from an earlier run must not keep a CVE on disk while the fix
+# ages). Called before the main upgrade loop, which then reaches the formula
+# through brew outdated: an aged latest upgrades normally, a CVE through the
+# bypass. The CVE check does not depend on the GitHub API answering.
 unpin_if_aged() {
   local pkg="$1"
-  local json tap ruby_path repo age_days
+  local json tap ruby_path repo age_days="" installed reason
 
   json=$(brew info "$pkg" --json 2>/dev/null) || return
   IFS=$'\x1f' read -r tap ruby_path _ _ _ < <(brew_meta <<<"$json")
   repo=$(tap_to_repo "$tap")
-  [[ -z $repo || -z $ruby_path ]] && return
+  if [[ -n $repo && -n $ruby_path ]] && fetch_commits "$repo" "$ruby_path"; then
+    age_days=$(commit_age_days <<<"$GH_BODY") || age_days=""
+  fi
 
-  fetch_commits "$repo" "$ruby_path" || return
-  age_days=$(commit_age_days <<<"$GH_BODY") || return
+  if [[ -n $age_days ]] && ((age_days >= MIN_AGE_DAYS)); then
+    reason="latest version now ${age_days}d old"
+  else
+    installed=$(installed_formula_version "$pkg")
+    [[ -n $installed ]] && installed_vulnerable "$pkg" "$installed" || return
+    reason="CVE in pinned v${installed}"
+  fi
 
-  if ((age_days >= MIN_AGE_DAYS)); then
-    if ((DRY_RUN)); then
-      _info "$pkg: latest version now ${age_days}d old — [dry-run] would unpin"
-      _DRY_UNPINNED[$pkg]=1
-      ((_UNPINNED++))
-    elif brew unpin "$pkg" 2>/dev/null; then
-      _ok "$pkg: latest version now ${age_days}d old — unpinned"
-      ((_UNPINNED++))
-    fi
+  if ((DRY_RUN)); then
+    _info "$pkg: $reason — [dry-run] would unpin"
+    _DRY_UNPINNED[$pkg]=1
+    ((_UNPINNED++))
+  elif brew unpin "$pkg" 2>/dev/null; then
+    _ok "$pkg: $reason — unpinned"
+    ((_UNPINNED++))
   fi
 }
 
@@ -704,7 +732,7 @@ _title "Summary"
   _count "Upgraded (age-gated):" "${_UPGRADED}" "$_c_ok"
   _count "Upgraded (CVE bypass):" "${_CVE_BYPASSED}" "$_c_ok"
   _count "Fallback installs:" "${_FALLBACK_INSTALLED}" "$_c_ok"
-  _count "Unpinned (now aged):" "${_UNPINNED}" "$_c_ok"
+  _count "Unpinned (aged or CVE):" "${_UNPINNED}" "$_c_ok"
   _count "Skipped:" "${_SKIPPED}" "$_c_dim"
   _count "Warnings:" "${_WARNED}" "$_c_warn"
   _count "Failed:" "${_FAILED}" "$_c_red"

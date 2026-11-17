@@ -41,7 +41,6 @@ declare -gA OSV_PACKAGES=(
   [xh]="crates.io:xh"
   # The yazi binary's crate; the `yazi` crate is an unrelated package
   [yazi]="crates.io:yazi-fm"
-  [zellij]="crates.io:zellij"
   [zoxide]="crates.io:zoxide"
   # Go modules
   [age]="Go:filippo.io/age"

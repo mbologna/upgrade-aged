@@ -102,6 +102,12 @@ disable = ["brew_formula", "brew_cask", "mise", "uv", "vscode"]
 "VS Code extensions (aged)" = "~/.local/bin/upgrade-vscode-extensions-aged.sh"
 ```
 
+## Versioning
+
+This repository has no releases: `main` is what you clone, and CI syncs it from my dotfiles
+whenever a mirrored script changes there. See the
+[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md).
+
 ## License
 
 [MIT](LICENSE)

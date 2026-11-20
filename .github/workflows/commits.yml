@@ -1,9 +1,8 @@
 name: Commits
 
 # Pull requests merge with a merge commit, so every commit lands on the
-# default branch as it is, and auto-release reads the subjects: each must
-# follow the commit rules (mbologna/commitlint-config), and no fixup! commit
-# may remain.
+# default branch as it is: each must follow the commit rules
+# (mbologna/commitlint-config), and no fixup! commit may remain.
 
 "on":
   pull_request:

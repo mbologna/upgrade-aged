@@ -108,6 +108,28 @@ disable = ["brew_formula", "brew_cask", "mise", "uv", "vscode", "mas"]
 "Mac App Store (aged)" = "~/.local/bin/upgrade-mas-aged.sh"
 ```
 
+## Why not an existing tool
+
+Some package managers now have an age gate of their own. None of them does what these scripts do:
+
+- mise's [`minimum_release_age`](https://mise.jdx.dev/configuration/settings.html) has no
+  vulnerability exemption, only warns about tools without release dates instead of skipping
+  them, and does not sync `mise.lock` back
+  ([#22](https://github.com/mbologna/upgrade-aged/issues/22)).
+- uv's `exclude-newer` has no vulnerability exemption.
+- Homebrew declined an age gate
+  ([Homebrew/brew#22659](https://github.com/Homebrew/brew/issues/22659), closed as not
+  planned), and has no fallback to an older formula version that is old enough.
+- mas and topgrade have no age gate
+  ([topgrade-rs/topgrade#1890](https://github.com/topgrade-rs/topgrade/issues/1890), tracked in
+  [#21](https://github.com/mbologna/upgrade-aged/issues/21)).
+- VS Code's `extensions.autoUpdateDelay` never picks an older version that is old enough,
+  starves extensions that publish often, and lets trusted publishers skip the delay
+  ([microsoft/vscode#342090](https://github.com/microsoft/vscode/issues/342090), tracked in
+  [#20](https://github.com/mbologna/upgrade-aged/issues/20)).
+
+Checked 2026-11-23.
+
 ## Versioning
 
 This repository has no releases: `main` is what you clone, and CI syncs it from my dotfiles

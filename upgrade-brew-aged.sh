@@ -278,7 +278,9 @@ refresh_outdated_cache() {
 
 # Returns 0 if all outdated transitive dependencies of $pkg have aged enough
 # (or carry a CVE in their installed version). Prints an info line for each
-# blocking dep and returns 1 if any dep would be pulled in too early.
+# blocking dep and returns 1 if any dep would be pulled in too early, is
+# still pinned (brew refuses to upgrade past a pinned dependency), or could
+# not be dated (the GitHub API failed or hit its rate limit).
 deps_aged() {
   local pkg="$1" is_cask="${2:-}"
   local dep_list rc=0
@@ -294,14 +296,23 @@ deps_aged() {
 
   for dep in "${dep_list[@]}"; do
     [[ -v _OUTDATED[$dep] ]] || continue
+    if [[ -v _PINNED[$dep] ]]; then
+      _info "dep $dep: pinned — not aged yet" "   "
+      rc=1
+      continue
+    fi
 
     local dep_tap dep_ruby_path dep_latest dep_repo dep_age
     IFS=$'\x1f' read -r dep_tap dep_ruby_path _ dep_latest _ < <(brew info "$dep" --json 2>/dev/null | brew_meta) || continue
     dep_repo=$(tap_to_repo "$dep_tap")
     [[ -z $dep_repo || -z $dep_ruby_path ]] && continue
 
-    fetch_commits "$dep_repo" "$dep_ruby_path" || continue
-    version_age "$dep_repo" "$dep_ruby_path" "$GH_BODY" "$dep_latest" || continue
+    if ! fetch_commits "$dep_repo" "$dep_ruby_path" ||
+      ! version_age "$dep_repo" "$dep_ruby_path" "$GH_BODY" "$dep_latest"; then
+      _info "dep $dep: could not date its latest version" "   "
+      rc=1
+      continue
+    fi
     dep_age=$VERSION_AGE
 
     if ((dep_age < MIN_AGE_DAYS)); then
@@ -539,7 +550,9 @@ upgrade_if_aged() {
     if [[ $ver != "$latest_version" ]]; then
       aged_sha="$sha"
       aged_version="$ver"
-      ((DRY_RUN)) || printf '%s\n' "$RAW_BODY" >"$tap_file"
+      # no_autobump! is refused outside the official taps, and only tells
+      # Homebrew's own bump bot to leave the file alone: drop it.
+      ((DRY_RUN)) || sed '/^[[:space:]]*no_autobump!/d' <<<"$RAW_BODY" >"$tap_file"
       break
     fi
   done < <(aged_commit_shas <<<"$commits_json")
@@ -586,6 +599,16 @@ upgrade_if_aged() {
   # below by dependents/pinned-deps checks, so don't say "installing" yet.
   _info "$label: latest v${latest_version} only ${age_days}d old — found aged fallback v${aged_version} (${aged_age_days}d old)"
 
+  # Check that Homebrew can load the staged file before anything is
+  # uninstalled: a load error found at install time used to leave the
+  # formula missing, and restoring it installed the unaged latest.
+  if ((! DRY_RUN)) && ! brew info ${is_cask:+--cask} --json=v2 "${AGED_TAP_NAME}/${formula_name}" &>/dev/null; then
+    _err "$label: Homebrew cannot load the aged v${aged_version} file, skipping fallback"
+    rm -f "$tap_file"
+    ((_FAILED++))
+    return
+  fi
+
   # Formulas from homebrew/core conflict with same-named formulas in other taps.
   # Uninstall first; skip if other installed packages depend on this one.
   if [[ -z $is_cask ]]; then
@@ -611,12 +634,16 @@ upgrade_if_aged() {
       return
     fi
     if ((DRY_RUN)); then
-      _info "[dry-run] would run: brew uninstall --ignore-dependencies $pkg" "   "
+      _info "[dry-run] would run: brew uninstall --ignore-dependencies --force $pkg" "   "
     else
-      # Unpin first so pin state doesn't interfere with uninstall.
+      # Unpin first so pin state doesn't interfere with uninstall; a failure
+      # below pins it again.
       brew unpin "$pkg" 2>/dev/null || true
-      brew uninstall --ignore-dependencies "$pkg" </dev/null 2>/dev/null || {
+      # --force removes every installed version: without it, a formula with
+      # two kegs keeps the older one and stays registered.
+      brew uninstall --ignore-dependencies --force "$pkg" </dev/null 2>/dev/null || {
         _err "$label: uninstall failed, skipping fallback"
+        [[ -v _PINNED[$pkg] ]] && brew pin "$pkg" 2>/dev/null
         rm -f "$tap_file"
         ((_FAILED++))
         return
@@ -625,6 +652,7 @@ upgrade_if_aged() {
       # yet leave the keg registered in some edge cases).
       if brew list "$pkg" &>/dev/null; then
         _err "$label: still registered after uninstall, skipping fallback"
+        [[ -v _PINNED[$pkg] ]] && brew pin "$pkg" 2>/dev/null
         rm -f "$tap_file"
         ((_FAILED++))
         return

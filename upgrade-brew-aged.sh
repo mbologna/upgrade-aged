@@ -330,6 +330,18 @@ deps_aged() {
   return $rc
 }
 
+# Returns 0 if the installed formula $1 ships a shared library or a framework
+# that a dependent could link against, and 1 if it ships none (a command-line
+# tool such as tmux). An install that can't be found counts as a library, so
+# dependents_ready stays conservative.
+provides_shared_libs() {
+  local prefix
+  prefix=$(brew --prefix "$1" 2>/dev/null)
+  [[ -n $prefix && -d $prefix ]] || return 0
+  [[ -d $prefix/Frameworks ]] && return 0
+  [[ -n $(find "$prefix/lib" \( -name '*.dylib' -o -name '*.so' -o -name '*.so.*' \) -print -quit 2>/dev/null) ]]
+}
+
 # Returns 0 if upgrading $pkg won't strand any installed dependent on a
 # now-missing shared library version (e.g. a versioned dylib/SONAME bump).
 # Blocks (returns 1, printing an info line per offender) if ANY installed
@@ -341,11 +353,14 @@ deps_aged() {
 # wait a few extra days for its dependents to individually catch up; the
 # payoff is that upgrading $pkg here can never leave an already-working,
 # already-installed dependent broken (see relink_dependents()'s doc comment
-# for how that used to happen with x265 → ffmpeg).
+# for how that used to happen with x265 → ffmpeg). A formula that ships no
+# shared library strands nothing, so its dependents never hold it back: tmux
+# used to wait weeks on tmuxinator, which waited on a young ruby.
 dependents_ready() {
   local pkg="$1" is_cask="${2:-}"
   [[ -n $is_cask ]] && return 0 # nothing installed links against a cask here
   ((${#_OUTDATED[@]})) || return 0
+  provides_shared_libs "$pkg" || return 0
 
   local dependents rc=0
   mapfile -t dependents < <(brew uses --installed --formula "$pkg" 2>/dev/null)

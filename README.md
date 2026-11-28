@@ -21,7 +21,7 @@ scripts cover what those settings cannot: Homebrew, VS Code and the Mac App Stor
 none, a vulnerability exemption, and upgrades that never go backwards.
 
 The reasoning, and how the scripts decide, is in the blog post
-[Making Homebrew and mise wait two weeks before they upgrade](https://www.michelebologna.net/2026/homebrew-mise-wait-two-weeks/).
+[Making Homebrew and mise wait two weeks before they upgrade](https://www.michelebologna.net/2026/two-week-wait-homebrew-mise/).
 
 These files are mirrored from my private dotfiles by CI. Fixes are welcome as issues; a pull
 request would be overwritten by the next sync, so I apply changes there and they come back here.
@@ -80,7 +80,7 @@ The scripts read environment variables:
 |---|---|---|
 | `MIN_AGE_DAYS` | `14` | Brew, uv tools, VS Code extensions and App Store apps: how many days old a release must be before it is installed. For mise, set `minimum_release_age` instead. |
 | `GITHUB_TOKEN` | the `gh` login | Brew only: a GitHub token. When unset, the script asks the [GitHub CLI](https://cli.github.com/) for its login. Without either, the GitHub API allows 60 requests an hour, which a normal week of updates uses up; with one, 5000. It needs no permissions. |
-| `MAX_COMMITS_BACK` | `5` | Brew only: how many past commits of a formula to search for an aged version. |
+| `MAX_COMMITS_BACK` | `10` | Brew only: how many past commits of a formula to read, to date its latest version and to find an aged one. |
 | `MISE_LOCK_AUTOCOMMIT` | `1` | mise only: commit `mise.lock` after syncing it back to a [chezmoi](https://www.chezmoi.io/) source directory. Does nothing without chezmoi. |
 | `MISE_LOCK_AUTOPUSH` | `0` | mise only: push after that commit. |
 

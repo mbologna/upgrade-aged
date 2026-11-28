@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Upgrade only Homebrew packages whose formula was last updated >= MIN_AGE_DAYS ago.
+# Upgrade only Homebrew packages whose latest version is >= MIN_AGE_DAYS old.
 # No -e: one failed brew/mise/API call counts as a failure and the run
 # goes on to the next package; pipefail and -u still catch mistakes.
 set -uo pipefail
@@ -19,7 +19,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [--dry-run] [--help]
 
-Upgrade Homebrew formulae and casks whose latest commit is >= MIN_AGE_DAYS old.
+Upgrade Homebrew formulae and casks whose latest version is >= MIN_AGE_DAYS old.
 GitHub API calls use the gh CLI login (or GITHUB_TOKEN) for 5000 req/hr, not 60.
 
 A package whose installed version has a known CVE (see OSV_PACKAGES in
@@ -34,7 +34,7 @@ Options:
 
 Environment variables:
   MIN_AGE_DAYS       Minimum age in days before upgrading (default: 14)
-  MAX_COMMITS_BACK   Number of past commits to search for an aged version (default: 5)
+  MAX_COMMITS_BACK   Number of past commits to search for an aged version (default: 10)
   GITHUB_TOKEN       GitHub token (default: the gh CLI login)
 EOF
   exit 0
@@ -71,7 +71,7 @@ _require brew jq
 # MAX_COMMITS_BACK commits and installs from the most recent aged one (n-1, n-2, …).
 
 MIN_AGE_DAYS=${MIN_AGE_DAYS:-14}
-MAX_COMMITS_BACK=${MAX_COMMITS_BACK:-5}
+MAX_COMMITS_BACK=${MAX_COMMITS_BACK:-10}
 NOW=$(date +%s)
 
 # Since Homebrew 6.0 a plain `brew outdated`/`brew upgrade` also lists an
@@ -96,6 +96,7 @@ declare -A _PINNED=()
 declare -A _DRY_UNPINNED=() # formulas unpin_if_aged would unpin, in --dry-run
 declare -A _RELINKED=()     # dependents already reinstalled this run, by relink_dependents (dedup)
 declare -A _CVE=()          # OSV answers by pkg@version, so no package is queried twice
+declare -A _RAW=()          # formula files by repo/sha/path, so no file is fetched twice
 declare -i _UPGRADED=0 _CVE_BYPASSED=0 _FALLBACK_INSTALLED=0 _UNPINNED=0 _SKIPPED=0 _WARNED=0 _FAILED=0
 
 setup_aged_tap() {
@@ -163,6 +164,50 @@ commit_age_days() {
 aged_commit_shas() {
   jq -r --argjson now "$NOW" --argjson min "$((MIN_AGE_DAYS * 86400))" \
     '.[] | select($now - (.commit.committer.date | fromdateiso8601) >= $min) | .sha'
+}
+
+# Fetches the formula/cask file $3 of repository $1 at commit $2 into
+# RAW_BODY, memoized for the run (a failure too, so every caller sees the same
+# answer); returns 1 if it could not be fetched. Call it directly, not in
+# $(...), or the cache is lost.
+fetch_raw() {
+  local key="$1/$2/$3"
+  if [[ ! -v _RAW[$key] ]]; then
+    _RAW[$key]=$(curl -sf --max-time 10 "https://raw.githubusercontent.com/${1}/${2}/${3}") || _RAW[$key]=$'\x1f'
+  fi
+  RAW_BODY=${_RAW[$key]}
+  [[ $RAW_BODY != $'\x1f' ]]
+}
+
+# Sets VERSION_AGE to the age in days of version $4, the latest, from the
+# commits-JSON blob $3 for file $2 of repository $1: the age of the oldest
+# commit in the blob that still carries it. Bottle rebuilds and metadata
+# edits commit to the file without changing the version (on 2026-11-27 one
+# homebrew-core commit added manifest_sha256 to every formula), so the newest
+# commit's age would restart the clock on releases weeks old, and a formula
+# that ships weekly would never age. When the blob holds only that version,
+# its oldest commit is a lower bound. Falls back to the newest commit's age
+# when the file at that commit does not parse to $4: the version cannot be
+# traced. Returns 1 if the blob has no commit date. Call it directly, not in
+# $(...), or the fetch_raw cache is lost.
+version_age() {
+  local repo="$1" path="$2" commits="$3" latest="$4" sha ver age
+  VERSION_AGE=$(commit_age_days <<<"$commits") || return 1
+  ((VERSION_AGE >= MIN_AGE_DAYS)) && return 0
+  local -a shas
+  mapfile -t shas < <(jq -r '.[].sha' <<<"$commits")
+  fetch_raw "$repo" "${shas[0]}" "$path" || return 0
+  ver=$(extract_formula_version <<<"$RAW_BODY" 2>/dev/null) || return 0
+  [[ $ver == "$latest" ]] || return 0
+  for sha in "${shas[@]:1}"; do
+    fetch_raw "$repo" "$sha" "$path" || return 0
+    ver=$(extract_formula_version <<<"$RAW_BODY" 2>/dev/null) || return 0
+    [[ $ver == "$latest" ]] || return 0
+    age=$(commit_age_days "$sha" <<<"$commits") || return 0
+    VERSION_AGE=$age
+    ((VERSION_AGE >= MIN_AGE_DAYS)) && return 0
+  done
+  return 0
 }
 
 # Prints tap, ruby_source_path, installed version (casks only; formulae get
@@ -250,13 +295,14 @@ deps_aged() {
   for dep in "${dep_list[@]}"; do
     [[ -v _OUTDATED[$dep] ]] || continue
 
-    local dep_tap dep_ruby_path dep_repo dep_age
-    IFS=$'\x1f' read -r dep_tap dep_ruby_path _ _ _ < <(brew info "$dep" --json 2>/dev/null | brew_meta) || continue
+    local dep_tap dep_ruby_path dep_latest dep_repo dep_age
+    IFS=$'\x1f' read -r dep_tap dep_ruby_path _ dep_latest _ < <(brew info "$dep" --json 2>/dev/null | brew_meta) || continue
     dep_repo=$(tap_to_repo "$dep_tap")
     [[ -z $dep_repo || -z $dep_ruby_path ]] && continue
 
     fetch_commits "$dep_repo" "$dep_ruby_path" || continue
-    dep_age=$(commit_age_days <<<"$GH_BODY") || continue
+    version_age "$dep_repo" "$dep_ruby_path" "$GH_BODY" "$dep_latest" || continue
+    dep_age=$VERSION_AGE
 
     if ((dep_age < MIN_AGE_DAYS)); then
       local dep_ver
@@ -369,10 +415,10 @@ upgrade_if_aged() {
   local pkg="$1" is_cask="${2:-}"
   local label="$pkg${is_cask:+ (cask)}"
 
-  # Already pinned from a previous run — skip without any API calls.
-  # unpin_if_aged() unpins it once the latest version has aged, or when the
-  # pinned version has a known vulnerability.
-  [[ -z $is_cask && -v _PINNED[$pkg] ]] && return
+  # A formula still pinned from a previous run has neither an aged latest
+  # nor a CVE (unpin_if_aged() unpinned those), so it reaches the fallback
+  # below, which moves it to a newer aged version when there is one and
+  # otherwise leaves the pin alone.
 
   # installed_version is reused for the CVE check and the fallback.
   local json tap ruby_path installed_version latest_version bundle_version
@@ -408,13 +454,14 @@ upgrade_if_aged() {
   }
   commits_json="$GH_BODY"
 
-  # Age in days of the latest commit.
+  # Age in days of the latest version.
   local age_days
-  age_days=$(commit_age_days <<<"$commits_json") || {
+  version_age "$repo" "$ruby_path" "$commits_json" "$latest_version" || {
     _warn "$label: could not parse commit date, skipping"
     ((_WARNED++))
     return
   }
+  age_days=$VERSION_AGE
 
   if ((age_days >= MIN_AGE_DAYS)); then
     if ! deps_aged "$pkg" "$is_cask"; then
@@ -461,13 +508,13 @@ upgrade_if_aged() {
     ((_WARNED++))
     return
   }
-  local head_content head_ver
-  head_content=$(curl -sf --max-time 10 "https://raw.githubusercontent.com/${repo}/${head_sha}/${ruby_path}") || {
+  local head_ver
+  fetch_raw "$repo" "$head_sha" "$ruby_path" || {
     _warn "$label: could not fetch HEAD formula, skipping"
     ((_WARNED++))
     return
   }
-  head_ver=$(extract_formula_version <<<"$head_content" 2>/dev/null)
+  head_ver=$(extract_formula_version <<<"$RAW_BODY" 2>/dev/null)
   # Only skip if we successfully extracted a version AND it disagrees with brew info.
   # If extraction failed (empty), treat as inconclusive and proceed.
   if [[ -n $head_ver && $head_ver != "$latest_version" ]]; then
@@ -486,15 +533,13 @@ upgrade_if_aged() {
   # For each aged commit, download the formula and check if it carries a different version.
   local aged_sha="" aged_version="" sha
   while IFS= read -r sha; do
-    local raw_url="https://raw.githubusercontent.com/${repo}/${sha}/${ruby_path}"
-    local formula_content
-    formula_content=$(curl -sf --max-time 10 "$raw_url") || continue
+    fetch_raw "$repo" "$sha" "$ruby_path" || continue
     local ver
-    ver=$(extract_formula_version <<<"$formula_content" 2>/dev/null) || continue
+    ver=$(extract_formula_version <<<"$RAW_BODY" 2>/dev/null) || continue
     if [[ $ver != "$latest_version" ]]; then
       aged_sha="$sha"
       aged_version="$ver"
-      ((DRY_RUN)) || printf '%s\n' "$formula_content" >"$tap_file"
+      ((DRY_RUN)) || printf '%s\n' "$RAW_BODY" >"$tap_file"
       break
     fi
   done < <(aged_commit_shas <<<"$commits_json")
@@ -505,9 +550,10 @@ upgrade_if_aged() {
     return
   fi
 
-  # If the n-1 version is already installed, just pin it silently (formulas) or skip (casks).
+  # If the n-1 version is already installed, just pin it silently (formulas,
+  # unless pinned already) or skip (casks).
   if [[ $aged_version == "$installed_version" ]]; then
-    if [[ -z $is_cask ]]; then
+    if [[ -z $is_cask && ! -v _PINNED[$pkg] ]]; then
       if ((DRY_RUN)); then
         _info "[dry-run] would run: brew pin $formula_name" "   "
       else
@@ -629,13 +675,14 @@ upgrade_if_aged() {
 # bypass. The CVE check does not depend on the GitHub API answering.
 unpin_if_aged() {
   local pkg="$1"
-  local json tap ruby_path repo age_days="" installed reason
+  local json tap ruby_path latest repo age_days="" installed reason
 
   json=$(brew info "$pkg" --json 2>/dev/null) || return
-  IFS=$'\x1f' read -r tap ruby_path _ _ _ < <(brew_meta <<<"$json")
+  IFS=$'\x1f' read -r tap ruby_path _ latest _ < <(brew_meta <<<"$json")
   repo=$(tap_to_repo "$tap")
-  if [[ -n $repo && -n $ruby_path ]] && fetch_commits "$repo" "$ruby_path"; then
-    age_days=$(commit_age_days <<<"$GH_BODY") || age_days=""
+  if [[ -n $repo && -n $ruby_path ]] && fetch_commits "$repo" "$ruby_path" &&
+    version_age "$repo" "$ruby_path" "$GH_BODY" "$latest"; then
+    age_days=$VERSION_AGE
   fi
 
   if [[ -n $age_days ]] && ((age_days >= MIN_AGE_DAYS)); then
